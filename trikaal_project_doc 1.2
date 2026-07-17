@@ -1,0 +1,433 @@
+# Trikaal — Seismic Intelligence Engine
+### Complete Project Documentation
+
+---
+
+## 1. Project Overview
+
+**Trikaal** is a research-grade seismic intelligence system for the **Kutch region, Gujarat, India** (bbox: 22–24.5°N, 68–71.5°E). It covers the full aftershock sequence of the **2001 Bhuj earthquake (Mw 7.7)** and broader seismicity from 1990 onward.
+
+### Goal
+Transition from raw earthquake catalog data → descriptive EDA → composite risk scoring → probabilistic ETAS-based forecasting.
+
+### Tech Stack
+| Library | Version | Purpose |
+|---------|---------|---------|
+| Python | 3.12+ | Core language |
+| pandas | ≥2.1 | Data wrangling |
+| numpy | ≥1.26 | Vectorized math |
+| scipy | ≥1.11 | MLE optimization, KS test |
+| matplotlib / seaborn | ≥3.8 / ≥0.13 | Static plots |
+| requests | ≥2.31 | API fetching |
+| folium | ≥0.15 | Interactive map |
+
+---
+
+## 2. Repository Layout
+
+```
+trikaal-/
+├── data/
+│   ├── raw/
+│   │   ├── kutch_usgs.csv       # USGS FDSN download
+│   │   └── kutch_isc.csv        # ISC FDSN download
+│   └── processed/
+│       └── kutch_clean.csv      # Merged, deduped, enriched catalog
+├── notebooks/
+│   └── 01_eda.ipynb             # Primary EDA notebook
+├── outputs/                     # All figures + CSVs + HTML
+│   ├── etas_params.json
+│   ├── etas_forecast.csv
+│   ├── etas_rolling.csv
+│   ├── risk_score.csv
+│   └── *.png
+├── src/
+│   ├── fetch_usgs.py
+│   ├── fetch_isc.py
+│   ├── preprocess.py
+│   ├── refit_analysis.py
+│   ├── risk_score.py
+│   ├── risk_dashboard.py
+│   ├── etas_model.py
+│   ├── etas_forecast.py
+│   └── run_etas.py
+└── requirements.txt
+```
+
+---
+
+## 3. Pipeline — Step by Step
+
+```
+fetch_usgs.py ─┐
+               ├─► preprocess.py ─► refit_analysis.py ─► risk_score.py ─► risk_dashboard.py
+fetch_isc.py  ─┘                                      └─► etas_model.py ─► etas_forecast.py
+```
+
+Run order:
+```bash
+python src/fetch_usgs.py
+python src/fetch_isc.py
+python src/preprocess.py
+python src/refit_analysis.py
+python src/risk_score.py
+python src/risk_dashboard.py
+python src/run_etas.py
+```
+
+---
+
+## 4. Module Documentation
+
+---
+
+### 4.1 `fetch_usgs.py` — USGS Catalog Fetcher
+
+**What it does:**  
+Queries the USGS FDSN Event Web Service year-by-year (1990 → today) for all M≥2.0 events in the Kutch bounding box. Saves to `data/raw/kutch_usgs.csv`.
+
+**Key design decisions:**
+- Year-by-year pagination to stay under the 20,000-event API cap
+- `orderby=time-asc` per chunk — prevents boundary-event gaps
+- 0.5s polite delay between requests
+- GeoJSON format — coordinates are in `[lon, lat, depth]` order (easy to misread)
+
+**Key config:**
+```python
+BBOX = dict(minlatitude=22.0, maxlatitude=24.5,
+            minlongitude=68.0, maxlongitude=71.5)
+MIN_MAG = 2.0
+ENDPOINT = "https://earthquake.usgs.gov/fdsnws/event/1/query"
+```
+
+**Output columns:** `id, time_utc, latitude, longitude, depth_km, magnitude, mag_type, place, net, nst, rms, gap, status, url`
+
+---
+
+### 4.2 `fetch_isc.py` — ISC Catalog Fetcher
+
+**What it does:**  
+Queries the ISC FDSN endpoint for the same bbox/time range. ISC has richer historical coverage but a ~2-year reviewed-bulletin lag. Saves to `data/raw/kutch_isc.csv`.
+
+**Key design decisions:**
+- ISC returns pipe-delimited `text` format (does NOT support GeoJSON)
+- Response header line starts with `#` — must be stripped before parsing
+- ISC sometimes returns HTTP 200 with `"Error 4xx"` in the body — explicit check added
+- 1.0s delay (ISC is stricter about rate limits than USGS)
+- Retry logic for `ReadTimeout` (ISC servers can be slow)
+- `isc_event_id` prefixed with `"isc_"` to prevent ID collisions with USGS IDs during merge
+
+**ISC column schema:**
+```
+isc_event_id | time_utc | latitude | longitude | depth_km |
+author | catalog | contributor | contributor_id |
+mag_type | magnitude | mag_author | place | event_type
+```
+
+---
+
+### 4.3 `preprocess.py` — Merge, Deduplicate, Enrich
+
+**What it does:**  
+Merges USGS + ISC catalogs, removes cross-catalog duplicates, drops bad rows, adds derived columns.
+
+**Cross-catalog deduplication strategy:**
+```
+Same event if:
+  |time difference| <= 60 seconds   AND
+  haversine distance <= 15 km
+→ Keep USGS entry, drop ISC entry
+```
+
+> **Why haversine, not degrees?**  
+> 0.5° ≈ 55 km at Kutch's latitude — way too coarse for a tightly clustered intraplate fault zone where distinct events sit <10 km apart. 15 km haversine is conservative and catches true duplicates without collapsing real events.
+
+**Derived columns added:**
+| Column | Formula |
+|--------|---------|
+| `year`, `month`, `decade` | From `time_utc` |
+| `days_since_1990` | `(time_utc - 1990-01-01) / 86400` |
+| `depth_cat` | shallow <70 km / intermediate 70–300 / deep >300 |
+
+**Negative depth fix:**  
+ISC uses a surface reference convention that can produce slightly negative depths (~−2 km). These are physically meaningless → nulled and dropped rather than zero-clipped (to avoid polluting depth distributions).
+
+**Final catalog:** 1,311 events, M2.0–7.7, 1991–2025
+
+---
+
+### 4.4 `refit_analysis.py` — b-value, Rolling b, Omori-Utsu
+
+**What it does:**  
+Four analyses on the clean catalog:
+
+#### Analysis 1: G-R Refit above Mc
+The naive whole-catalog b-value came out at **b = 0.715** — biased low because M2–2.9 events are incomplete (network was sparse pre-2001). Refitting above **Mc = 3.0** using Aki 1965 MLE with Utsu midpoint correction:
+
+```
+b = log10(e) / (mean_M - (Mc - dM/2))
+σ_b = 2.30 * b² * std(M) / sqrt(N)      [Shi & Bolt 1982]
+```
+
+**Result: b = 0.963 ± 0.034** — within the published Kutch range (0.9–1.05). ✓
+
+#### Analysis 2: Rolling b-value (50-event window, fixed Mc=3.0)
+A time-varying b to detect stress changes. Fixed Mc enforced per window to prevent completeness drift from corrupting the series.
+
+**Finding:** Clear **low-b phase from ~2005–2013** — b dropped to ~0.7–0.8, suggesting elevated crustal stress in the post-Bhuj recovery period.
+
+#### Analysis 3: Sensitivity check (100-event window)
+Same low-b phase persists at N=100 → **robust signal**, not a window-size artefact.
+
+#### Analysis 4: Aftershock vs Background b-value split
+| Period | N (M≥3) | b-value |
+|--------|---------|---------|
+| Aftershock 2001–2006 | ~780 | **0.89 ± 0.04** |
+| Background pre-2001 + post-2006 | ~233 | **1.08 ± 0.09** |
+
+Aftershock b < background b — consistent with stress saturation in the rupture zone.
+
+**Outputs:** `gr_refit_Mc.png`, `rolling_bvalue_mc_filtered.png`, `rolling_bvalue_sensitivity.png`, `bvalue_period_split.png`
+
+---
+
+### 4.5 `risk_score.py` — Composite Risk Engine
+
+**What it does:**  
+Computes a time-varying composite risk score `Risk(t) ∈ [0,1]` over 14-day bins using three normalized signals:
+
+```
+Risk(t) = 0.40 · S_b(t) + 0.35 · S_rate(t) + 0.25 · S_cluster(t)
+```
+
+| Signal | Formula | Interpretation |
+|--------|---------|---------------|
+| `S_b` | `clip((b_ref - b_t)/(b_ref - b_min), 0, 1)` | Low b → high stress |
+| `S_rate` | `sigmoid((rate - median) / IQR)` | Event rate spike |
+| `S_cluster` | `1 - normalize(mean NND km)` | Tight spatial cluster |
+
+**b_ref = 1.0, b_min = 0.5** (from catalog). Robust z-score (median/IQR) used for rate signal so the Bhuj period doesn't collapse quantile boundaries for the rest of the catalog.
+
+**Spatial clustering** uses the mean Nearest-Neighbor Distance (NND) computed from a fully vectorized haversine distance matrix per bin.
+
+**Classification:** Quantile-based (Q33 / Q66) — adaptive to the catalog, no hard-coded thresholds.
+
+**Outputs:** `risk_score.csv` (per-bin table), `risk_timeline.png` (4-panel figure)
+
+---
+
+### 4.6 `risk_dashboard.py` — Interactive HTML Dashboard
+
+**What it does:**  
+Reads `risk_score.csv` and generates a self-contained HTML file (`risk_dashboard.html`) using Plotly.js (CDN). Opens in any browser, no server needed.
+
+**Design:** Dark-mode glassmorphism UI with:
+- Sticky nav bar showing current risk status (pulsing dot)
+- KPI cards (peak score, mean score, HIGH-risk bin count, M≥4 event count)
+- Interactive Composite Risk Timeline (bar chart + Q33/Q66 threshold lines + M≥4 event overlay)
+- Signal Components chart (S_b, S_rate, S_cluster stacked)
+- Risk Score Distribution histogram
+- Model Parameters info table
+
+---
+
+### 4.7 `etas_model.py` — Vectorized ETAS Model
+
+**What it does:**  
+Implements the Ogata (1988) ETAS (Epidemic Type Aftershock Sequence) model with fully vectorized MLE fitting.
+
+**ETAS conditional intensity:**
+```
+λ(t) = μ + Σ_{t_i < t} K·exp(α(m_i - Mc)) · (t - t_i + c)^{-p}
+```
+
+**Parameters:** μ (background), K (productivity), α (magnitude scaling), c (Omori offset), p (decay exponent)
+
+**Vectorized log-likelihood:**
+```python
+# Precompute (N×N) time-difference matrix once
+dt_mat = t[None, :] - t[:, None]      # shape (N, N)
+causal = dt_mat > 0                    # upper-triangular mask
+
+# Per optimizer call (fast):
+kernel    = where(causal, (dt + c)**(-p), 0.0)
+triggered = exp_dm @ kernel            # (N,) — one matrix multiply
+intensity = mu + triggered
+log_lik   = sum(log(intensity)) - (mu*T + dot(exp_dm, integ))
+```
+
+**Memory modes:**
+- `N ≤ 4,000` → precomputed (N×N) matrix in `__init__` — ~128 MB at N=4000, reused every call
+- `N > 4,000` → chunked row-by-row loop (512-event chunks) — memory-safe
+
+**Fitting:** L-BFGS-B with 5 random restarts, bounds-constrained.
+
+**Goodness-of-fit:** Ogata time-rescaling KS test — cumulative integrated intensity Λ(t_j) computed vectorized using the same (N×N) matrix.
+
+---
+
+### 4.8 `etas_forecast.py` — ETAS Forecast Engine
+
+**What it does:**  
+Given a fitted `ETASModel`, computes expected event counts and exceedance probabilities for arbitrary future horizons.
+
+**Core integral (fully vectorized):**
+```
+Λ(t_start, t_end) = μ(t_end - t_start)
+    + Σ_i K·exp(α·dm_i) · ∫[max(t_start,t_i)]^[t_end] (t-t_i+c)^{-p} dt
+```
+
+The integral has a closed form for p≠1:
+```
+∫ = [(a+c)^(1-p) - (b+c)^(1-p)] / (p-1)
+```
+
+**Outputs per horizon:**
+- `E[N | M≥Mc]` — expected event count
+- `P(N≥1)` — Poisson exceedance probability
+- `P(N≥5)` — large-swarm probability
+
+**`rolling_forecast()`** slides a 14-day window over the catalog, mirroring `risk_score.py`'s binning for direct comparison.
+
+---
+
+### 4.9 `run_etas.py` — Real Catalog Runner
+
+Loads `kutch_clean.csv`, fits `ETASModel(Mc=3.0, n_restarts=5)`, runs KS test, generates forecast table and rolling CSV.
+
+---
+
+## 5. Results
+
+### Catalog Summary
+| Metric | Value |
+|--------|-------|
+| Total events (M≥2.0) | 1,311 |
+| M≥3.0 events used for ETAS | 1,013 |
+| Magnitude range | M2.0 – M7.7 |
+| Catalog span | 1991-01-20 to 2025 (~34.9 years) |
+| Sources | USGS + ISC merged |
+
+### Seismological Results
+| Analysis | Result |
+|---------|--------|
+| Completeness magnitude Mc | 3.0 |
+| b-value (whole catalog, M≥3) | 0.963 ± 0.034 |
+| b-value aftershock period 2001–2006 | 0.89 ± 0.04 |
+| b-value background period | 1.08 ± 0.09 |
+| Omori p (refit_analysis) | 0.83 |
+| Low-b stress phase | 2005–2013 (robust) |
+
+### ETAS Fit Results
+| Parameter | Value | Meaning |
+|-----------|-------|---------|
+| μ | 0.000498 /day | Very low background — Kutch is triggering-dominated |
+| K | 0.01522 | Aftershock productivity |
+| α | 1.2323 | Magnitude-dependent branching |
+| c | 0.000005 days | Near-instant Omori onset |
+| p | **0.9195** | Decay exponent (vs. 0.83 from Omori-only fit) |
+| KS p-value | 0.027 | Marginal — Bhuj Mw7.7 dominates rescaled-time distribution |
+
+### ETAS Forecasts (from end of catalog)
+| Horizon | E[N≥M3] | P(at least 1) |
+|---------|---------|--------------|
+| 1 day | 0.87 | 58% |
+| 7 days | 1.18 | 69% |
+| 30 days | 1.69 | 82% |
+| 1 year | 6.47 | 99.8% |
+
+---
+
+## 6. Problems Faced & How We Fixed Them
+
+### P1 — USGS GeoJSON coordinate order
+**Problem:** GeoJSON coordinates are `[longitude, latitude, depth]` — the opposite of what you'd expect. Naive access would silently swap lat/lon, causing all events to plot in the ocean.  
+**Fix:** Explicit unpacking `g = coords; lat=g[1], lon=g[0], depth=g[2]`.
+
+---
+
+### P2 — ISC pipe-delimited format + error body
+**Problem:** ISC doesn't support GeoJSON. Its `text` format uses pipe `|` delimiters with a `#`-prefixed header. Worse, ISC returns HTTP 200 with `"Error 404: ..."` in the body on bad queries.  
+**Fix:** Strip `#` from header, parse data lines with `pd.read_csv(StringIO(...), sep='|')`. Added explicit `text.startswith("Error")` check before parsing.
+
+---
+
+### P3 — Cross-catalog duplicate detection was too coarse
+**Problem:** First implementation used a 0.5-degree spatial window (~55 km at Kutch latitude). This collapsed legitimately separate events in the densely clustered fault zone.  
+**Fix:** Replaced with vectorized haversine distance ≤ 15 km as the spatial threshold.
+
+---
+
+### P4 — b-value biased low by network incompleteness
+**Problem:** Whole-catalog b = 0.715 — outside published range. Caused by M2–2.9 events being under-recorded before the network densified post-2001.  
+**Fix:** Applied Mc = 3.0 cutoff, used Aki 1965 MLE with Utsu midpoint correction. Result: b = 0.963 ± 0.034 ✓
+
+---
+
+### P5 — ETAS intensity() loop was O(N×Q) per call
+**Problem:** Original naive `intensity()` looped over all N history events for each of Q query points. For 1,311 events over a 2,000-point grid → 2.6M operations per optimizer call × hundreds of calls = very slow.  
+**Fix:** Fully vectorized: precompute `dt_mat = t_query[None,:] - t_hist[:,None]` → apply kernel in one broadcast → sum over axis 0. 50–100× speedup.
+
+---
+
+### P6 — ETAS (N×N) matrix caused OOM on large synthetic catalog
+**Problem:** Synthetic test generator didn't cap magnitudes (GR distribution has a heavy tail). Without a cap, one M6+ event could spawn thousands of aftershocks, creating a catalog of 300,000+ events. Precomputing the (300k × 300k) matrix tried to allocate 796 GiB → crash.  
+**Fix:**  
+1. Capped magnitudes at M7.5 in the GR sampler.  
+2. Added a per-event aftershock count hard cap of 200.  
+3. Added `_PRECOMPUTE_LIMIT = 4,000` — above this, `ETASModel` auto-switches to a chunked 512-event column loop (memory-safe, ~3× slower).
+
+---
+
+### P7 — numpy 2.x dropped `np.trapz`
+**Problem:** `numpy >= 2.0` removed the old `np.trapz` alias.  
+**Fix:** Use `np.trapezoid` (new name) or avoid trapezoidal integration entirely (closed-form Omori integrals used instead).
+
+---
+
+### P8 — Windows cp1252 encoding errors on all print statements
+**Problem:** Python on Windows defaults to `cp1252` console encoding. Every unicode character in print statements (`→`, `✓`, `✗`, `≥`, `−`, `…`, `μ`, `α`) raised `UnicodeEncodeError`.  
+**Fix:** Systematically replaced all unicode characters in print statements and DataFrame column names with ASCII equivalents (`-->`, `[OK]`, `[!!]`, `>=`, `-`, `...`, `mu`, `alpha`) across `etas_model.py`, `etas_forecast.py`, and `run_etas.py`.
+
+---
+
+### P9 — KS test marginal on real catalog (p=0.027)
+**Problem:** ETAS time-rescaling KS test failed the 0.05 threshold on the Kutch catalog.  
+**Root cause:** The Bhuj Mw7.7 event alone generates ~70% of all triggered activity. A single dominant mainshock creates a large jump in the rescaled-time series that a standard KS test flags, even when the model fits well everywhere else.  
+**Status:** Known limitation. Mitigation: apply mainshock-aftershock suppression window for Mw≥6 events (next step).
+
+---
+
+## 7. Output Files
+
+| File | Description |
+|------|-------------|
+| `data/raw/kutch_usgs.csv` | Raw USGS catalog |
+| `data/raw/kutch_isc.csv` | Raw ISC catalog |
+| `data/processed/kutch_clean.csv` | Final merged catalog (1,311 events) |
+| `outputs/gr_refit_Mc.png` | G-R b-value refit plot |
+| `outputs/rolling_bvalue_mc_filtered.png` | Rolling b (N=50 window) |
+| `outputs/rolling_bvalue_sensitivity.png` | Rolling b sensitivity (N=50 vs N=100) |
+| `outputs/bvalue_period_split.png` | Aftershock vs background b-value |
+| `outputs/omori_utsu_decay.png` | Omori-Utsu aftershock decay fit |
+| `outputs/omori_loglog_verification.png` | Log-log Omori verification |
+| `outputs/risk_score.csv` | Per-bin composite risk table |
+| `outputs/risk_timeline.png` | 4-panel risk timeline figure |
+| `outputs/kutch_interactive_map.html` | Interactive Folium event map |
+| `outputs/etas_params.json` | Fitted ETAS parameters |
+| `outputs/etas_forecast.csv` | Multi-horizon forecast table |
+| `outputs/etas_rolling.csv` | 912-bin rolling 14-day forecast |
+
+---
+
+## 8. What's Next
+
+- **`02_etas.ipynb`** — Diagnostic notebook: plot λ(t) alongside actual events, overlay ETAS rolling forecast vs. risk_score.py composite risk
+- **Spatial ETAS / grid risk** — Per-cell expected count maps over the Kutch grid
+- **Mainshock-aftershock suppression** — ETAS variant that excludes Mw≥6 events from the KS test to get a cleaner goodness-of-fit
+- **Streamlit app** — Interactive UI wrapping the full pipeline with live re-fetch + risk dashboard
+
+---
+
+*Trikaal Seismic Intelligence Engine — Kutch, Gujarat, India*  
+*Data: USGS ComCat + ISC Bulletin | Model: ETAS (Ogata 1988)*
