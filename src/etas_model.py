@@ -231,3 +231,53 @@ class ETASModel:
         print(f"  mu={p['mu']:.5f}  K={p['K']:.5f}  alpha={p['alpha']:.4f}"
               f"  c={p['c']:.5f}  p={p['p']:.4f}")
         print(f"  -logL = {p['neg_loglik']:.4f}   N={p['N']}   T={p['T']:.1f} days")
+
+
+def intensity_at_events(times: np.ndarray, mags: np.ndarray, Mc: float, params: list) -> np.ndarray:
+    """Computes the ETAS conditional intensity lambda(t_i) at each event time."""
+    mu, K, alpha, c, p = params
+    t = np.asarray(times, dtype=np.float64)
+    m = np.asarray(mags, dtype=np.float64)
+    dm = m - Mc
+    
+    # Precompute time difference matrix
+    dt_mat = t[None, :] - t[:, None]
+    causal = dt_mat > 0
+    exp_dm = K * np.exp(alpha * dm)
+    
+    with np.errstate(divide="ignore", invalid="ignore"):
+        kernel = np.where(causal, (dt_mat + c) ** (-p), 0.0)
+    triggered = exp_dm @ kernel
+    return mu + triggered
+
+
+def integral_lambda(history_times: np.ndarray, history_mags: np.ndarray, Mc: float, params: list, t_end: float) -> float:
+    """
+    Computes cumulative integrated intensity Λ(0, t_end) given history of events before t_end.
+    Λ(0, t_end) = μ·t_end + Σ_{t_j < t_end} K·exp(α(M_j − Mc)) · ∫_{t_j}^{t_end} (t − t_j + c)^{−p} dt
+    """
+    mu, K, alpha, c, p = params
+    t_hist = np.asarray(history_times, dtype=np.float64)
+    m_hist = np.asarray(history_mags, dtype=np.float64)
+    dm = m_hist - Mc
+    
+    # We only integrate events that occurred before t_end
+    active = t_hist < t_end
+    if not np.any(active):
+        return mu * t_end
+        
+    t_active = t_hist[active]
+    dm_active = dm[active]
+    exp_dm = K * np.exp(alpha * dm_active)
+    
+    # The duration each event has been decaying is t_end - t_j
+    b = t_end - t_active
+    
+    if abs(p - 1.0) < 1e-8:
+        integ = np.log((b + c) / c)
+    else:
+        integ = ((b + c) ** (1.0 - p) - c ** (1.0 - p)) / (1.0 - p)
+        
+    return mu * t_end + float(np.dot(exp_dm, integ))
+
+
