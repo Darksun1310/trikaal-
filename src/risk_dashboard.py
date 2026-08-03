@@ -17,10 +17,28 @@ from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
+import webbrowser
+import http.server
+import socketserver
+import threading
+import time
 
 DATA_PATH = Path(__file__).parent.parent / "data" / "processed" / "kutch_clean.csv"
 RISK_PATH = Path(__file__).parent.parent / "outputs" / "risk_score.csv"
 OUT_PATH  = Path(__file__).parent.parent / "outputs" / "risk_dashboard.html"
+OPT_PATH  = Path(__file__).parent.parent / "outputs" / "optimal_weights.json"
+
+# Load dynamic optimal weights if available
+w_b, w_r, w_c = 0.40, 0.35, 0.25
+if OPT_PATH.exists():
+    try:
+        with open(OPT_PATH, "r") as f:
+            opt = json.load(f)
+            w_b = opt["w_b"]
+            w_r = opt["w_rate"]
+            w_c = opt["w_cluster"]
+    except Exception:
+        pass
 
 
 # ── Data helpers ───────────────────────────────────────────────────────────
@@ -424,7 +442,7 @@ function bhujAnnot(y=0.96){{
     ['S_b formula','clip((b_ref−b_t)/(b_ref−b_min),0,1)'],
     ['S_rate formula','sigmoid((rate−μ)/σ)'],
     ['S_cluster formula','1 − normalize(mean NND km)'],
-    ['Weights','0.40·S_b + 0.35·S_rate + 0.25·S_cluster'],
+    ['Weights',f'{w_b:.2f}·S_b + {w_r:.2f}·S_rate + {w_c:.2f}·S_cluster (Data-Driven Optimized)'],
     ['Classification','Quantile Q33 / Q66 (adaptive)'],
     ['Min events for b','15 per 90-day window'],
     ['Data sources','USGS + ISC merged catalog'],
@@ -440,9 +458,26 @@ function bhujAnnot(y=0.96){{
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
+class DashboardHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # suppress standard server logs to keep terminal clean
+
+def serve_dashboard(port=8000):
+    handler = DashboardHandler
+    import os
+    # Serve from the repository root
+    os.chdir(str(Path(__file__).parent.parent))
+    socketserver.TCPServer.allow_reuse_address = True
+    try:
+        with socketserver.TCPServer(("", port), handler) as httpd:
+            print(f"  Local server started at http://localhost:{port}/outputs/risk_dashboard.html")
+            httpd.serve_forever()
+    except Exception as e:
+        print(f"  Server error: {e}")
+
 if __name__ == "__main__":
     print("=" * 60)
-    print("  TRIKAAL — Risk Dashboard Generator")
+    print("  TRIKAAL - Risk Dashboard Generator")
     print("=" * 60)
 
     if not RISK_PATH.exists():
@@ -453,6 +488,23 @@ if __name__ == "__main__":
     html = generate_html(risk_data, events_data, last_label, last_score)
     OUT_PATH.write_text(html, encoding="utf-8")
 
-    print(f"  Saved → {OUT_PATH}")
-    print(f"  Open in browser: file:///{OUT_PATH.resolve()}")
-    print("\n✓ Dashboard ready.")
+    print(f"  Saved --> {OUT_PATH}")
+
+    # Launch server in a daemon thread
+    port = 8000
+    t = threading.Thread(target=serve_dashboard, args=(port,), daemon=True)
+    t.start()
+    
+    # Wait a moment for server to initialize
+    time.sleep(0.5)
+    
+    url = f"http://localhost:{port}/outputs/risk_dashboard.html"
+    print(f"  Launching browser to: {url} ...")
+    webbrowser.open(url)
+    
+    print("\n[SUCCESS] Dashboard ready. Press Ctrl+C in this terminal to stop the server.")
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nShutting down server.")
