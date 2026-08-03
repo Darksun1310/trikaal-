@@ -20,3 +20,10 @@ dist/
 .env
 
 .venv/
+
+# LaTeX
+*.aux
+*.log
+*.out
+*.synctex.gz
+
