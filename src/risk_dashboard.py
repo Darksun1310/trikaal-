@@ -442,7 +442,7 @@ function bhujAnnot(y=0.96){{
     ['S_b formula','clip((b_ref−b_t)/(b_ref−b_min),0,1)'],
     ['S_rate formula','sigmoid((rate−μ)/σ)'],
     ['S_cluster formula','1 − normalize(mean NND km)'],
-    ['Weights',f'{w_b:.2f}·S_b + {w_r:.2f}·S_rate + {w_c:.2f}·S_cluster (Data-Driven Optimized)'],
+    ['Weights','{w_b:.2f}·S_b + {w_r:.2f}·S_rate + {w_c:.2f}·S_cluster (Data-Driven Optimized)'],
     ['Classification','Quantile Q33 / Q66 (adaptive)'],
     ['Min events for b','15 per 90-day window'],
     ['Data sources','USGS + ISC merged catalog'],
