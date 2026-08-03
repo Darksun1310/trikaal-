@@ -447,7 +447,7 @@ Our long-term Probabilistic Seismic Hazard Analysis (PSHA) predicts Peak Ground 
   3. No immediate emergency pre-positioning required.
 """
 
-    with open(BULLETIN_PATH, "w") as f:
+    with open(BULLETIN_PATH, "w", encoding="utf-8") as f:
         f.write(bulletin_md)
         
     print(f"  Bulletin written to {BULLETIN_PATH}")
@@ -455,7 +455,7 @@ Our long-term Probabilistic Seismic Hazard Analysis (PSHA) predicts Peak Ground 
     # ── [6] Append Bulletin Log ──
     log_path = OUT_DIR / "bulletin_log.txt"
     log_line = f"[{t_now.strftime('%Y-%m-%d %H:%M:%S')}] Events Added: {n_new} | Alert: {alert_level} | SSI: {ssi_val:.4f} | 7-day Prob: {forecasts[7]['prob_at_least_one']:.2%} | Amp: {amp_factor:.4f}x\n"
-    with open(log_path, "a") as f_log:
+    with open(log_path, "a", encoding="utf-8") as f_log:
         f_log.write(log_line)
     print(f"  Logged entry to {log_path.name}")
     print("=" * 60)
