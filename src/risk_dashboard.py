@@ -26,6 +26,7 @@ import time
 DATA_PATH = Path(__file__).parent.parent / "data" / "processed" / "kutch_clean.csv"
 RISK_PATH = Path(__file__).parent.parent / "outputs" / "risk_score.csv"
 OUT_PATH  = Path(__file__).parent.parent / "outputs" / "risk_dashboard.html"
+ROOT_INDEX = Path(__file__).parent.parent / "index.html"
 OPT_PATH  = Path(__file__).parent.parent / "outputs" / "optimal_weights.json"
 
 # Load dynamic optimal weights if available
@@ -487,8 +488,10 @@ if __name__ == "__main__":
     risk_data, events_data, last_label, last_score = load_and_package()
     html = generate_html(risk_data, events_data, last_label, last_score)
     OUT_PATH.write_text(html, encoding="utf-8")
+    ROOT_INDEX.write_text(html, encoding="utf-8")
 
     print(f"  Saved --> {OUT_PATH}")
+    print(f"  Saved --> {ROOT_INDEX} (for GitHub Pages)")
 
     # Launch server in a daemon thread
     port = 8000
