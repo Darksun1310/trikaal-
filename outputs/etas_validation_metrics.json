@@ -1,0 +1,29 @@
+{
+  "7": {
+    "Brier_ETAS": 0.06869309987192859,
+    "Brier_Poisson": 0.26396177638317586,
+    "Brier_Skill_Score": 0.7397611850732079,
+    "LogL_ETAS": -65.08601964478723,
+    "LogL_Poisson": -175.27307285217387,
+    "Information_Gain_Bits_Per_Event": 9.350959719556768,
+    "AUC_ROC": 0.5055570615342909
+  },
+  "14": {
+    "Brier_ETAS": 0.11708516397150287,
+    "Brier_Poisson": 0.5228101299422385,
+    "Brier_Skill_Score": 0.7760464894120572,
+    "LogL_ETAS": -107.23040577320616,
+    "LogL_Poisson": -330.90236721932234,
+    "Information_Gain_Bits_Per_Event": 10.084075923881851,
+    "AUC_ROC": 0.5554785020804436
+  },
+  "30": {
+    "Brier_ETAS": 0.2196618241136616,
+    "Brier_Poisson": 0.7065163333183171,
+    "Brier_Skill_Score": 0.6890916547081521,
+    "LogL_ETAS": -185.96389553274403,
+    "LogL_Poisson": -662.7343946816538,
+    "Information_Gain_Bits_Per_Event": 9.687808940342084,
+    "AUC_ROC": 0.5095382049411029
+  }
+}

@@ -136,12 +136,82 @@ class ETASModel:
 
         self.result_ = best_res
         mu, K, alpha, c, p = best_res.x
+        
+        # Standard errors computation via numerical Hessian
+        se = self._compute_standard_errors(best_res.x)
+        
         self.params_ = {
             "mu": mu, "K": K, "alpha": alpha, "c": c, "p": p,
             "Mc": self.Mc, "N": self.N, "T": self.T,
             "neg_loglik": float(best_val),
+            "log_likelihood": -float(best_val),
+            "se_mu": float(se[0]),
+            "se_K": float(se[1]),
+            "se_alpha": float(se[2]),
+            "se_c": float(se[3]),
+            "se_p": float(se[4]),
+            "se": [float(val) for val in se]
         }
         return self
+
+    def _compute_hessian(self, theta: np.ndarray, eps: float = 1e-3) -> np.ndarray:
+        n = len(theta)
+        hessian = np.zeros((n, n))
+        steps = eps * np.maximum(np.abs(theta), 1e-5)
+        
+        for i in range(n):
+            for j in range(n):
+                h_i = steps[i]
+                h_j = steps[j]
+                if i == j:
+                    theta_plus = theta.copy()
+                    theta_plus[i] += h_i
+                    theta_minus = theta.copy()
+                    theta_minus[i] -= h_i
+                    f_plus = self._neg_loglik(theta_plus)
+                    f_minus = self._neg_loglik(theta_minus)
+                    f_zero = self._neg_loglik(theta)
+                    hessian[i, j] = (f_plus - 2 * f_zero + f_minus) / (h_i ** 2)
+                else:
+                    theta_p_p = theta.copy()
+                    theta_p_p[i] += h_i
+                    theta_p_p[j] += h_j
+                    
+                    theta_p_m = theta.copy()
+                    theta_p_m[i] += h_i
+                    theta_p_m[j] -= h_j
+                    
+                    theta_m_p = theta.copy()
+                    theta_m_p[i] -= h_i
+                    theta_m_p[j] += h_j
+                    
+                    theta_m_m = theta.copy()
+                    theta_m_m[i] -= h_i
+                    theta_m_m[j] -= h_j
+                    
+                    f_p_p = self._neg_loglik(theta_p_p)
+                    f_p_m = self._neg_loglik(theta_p_m)
+                    f_m_p = self._neg_loglik(theta_m_p)
+                    f_m_m = self._neg_loglik(theta_m_m)
+                    
+                    hessian[i, j] = (f_p_p - f_p_m - f_m_p + f_m_m) / (4 * h_i * h_j)
+        return hessian
+
+    def _compute_standard_errors(self, theta: np.ndarray) -> np.ndarray:
+        hess = self._compute_hessian(theta)
+        try:
+            cov = np.linalg.inv(hess)
+            se = np.sqrt(np.diag(cov))
+            if np.any(np.isnan(se)) or np.any(se <= 0):
+                # Fallback to diagonal Hessian approximation if inverse is unstable
+                se = np.zeros_like(theta)
+                for i in range(len(se)):
+                    se[i] = 1.0 / np.sqrt(max(hess[i, i], 1e-15))
+        except Exception:
+            se = np.zeros_like(theta)
+            for i in range(len(se)):
+                se[i] = 1.0 / np.sqrt(max(hess[i, i], 1e-15))
+        return se
 
     # ------------------------------------------------------------------
     # Intensity evaluation (vectorized over query times)

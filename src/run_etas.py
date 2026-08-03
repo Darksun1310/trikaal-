@@ -67,11 +67,11 @@ def main():
     model.fit(n_restarts=5, seed=42)
     fp = model.params_
 
-    print(f"    mu    = {fp['mu']:.6f}  (background rate, events/day)")
-    print(f"    K     = {fp['K']:.6f}  (productivity)")
-    print(f"    alpha = {fp['alpha']:.4f}  (magnitude scaling)")
-    print(f"    c     = {fp['c']:.6f}  (Omori time offset, days)")
-    print(f"    p     = {fp['p']:.4f}  (Omori decay exponent)")
+    print(f"    mu    = {fp['mu']:.6f} +/- {fp['se_mu']:.6f}  (background rate, events/day)")
+    print(f"    K     = {fp['K']:.6f} +/- {fp['se_K']:.6f}  (productivity)")
+    print(f"    alpha = {fp['alpha']:.4f} +/- {fp['se_alpha']:.4f}  (magnitude scaling)")
+    print(f"    c     = {fp['c']:.6f} +/- {fp['se_c']:.6f}  (Omori time offset, days)")
+    print(f"    p     = {fp['p']:.4f} +/- {fp['se_p']:.4f}  (Omori decay exponent)")
     print(f"    -logL = {fp['neg_loglik']:.4f}")
 
     # Compare p to Omori fit from refit_analysis
